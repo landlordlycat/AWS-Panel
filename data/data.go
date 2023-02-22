@@ -6,18 +6,25 @@ import (
 	log "github.com/sirupsen/logrus"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
+	"gorm.io/gorm/logger"
 )
 
-var Db *gorm.DB
+var client *gorm.DB
 
-func DbInit(path string) error {
+func Init(path string) error {
 	if utils.IsNotFound(path) {
 		defer func() {
-			CreateAdminUser()
-			log.Info("Done.Default account: admin password: admin123456")
+			log.Info("Create default admin")
+			err := CreateUser("admin", "admin@admin.com", "admin", 1)
+			if err != nil {
+				log.Error("Create user error: ", err)
+				return
+			}
+			log.Info("Done. account: admin password: admin123456")
 		}()
 	}
-	db, openErr := gorm.Open(sqlite.Open(path), &gorm.Config{})
+	db, openErr := gorm.Open(sqlite.Open(path),
+		&gorm.Config{Logger: logger.Default.LogMode(logger.Silent)})
 	if openErr != nil {
 		return fmt.Errorf("open db error: %v", openErr)
 	}
@@ -25,6 +32,6 @@ func DbInit(path string) error {
 	if err != nil {
 		return fmt.Errorf("AutoMigrate error: %v", err)
 	}
-	Db = db
+	client = db
 	return nil
 }

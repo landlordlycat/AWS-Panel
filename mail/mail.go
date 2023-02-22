@@ -1,6 +1,7 @@
 package mail
 
 import (
+	"github.com/Yuzuki616/Aws-Panel/conf"
 	"gopkg.in/gomail.v2"
 	"strings"
 )
@@ -9,13 +10,17 @@ const tmpl = "<div style=\"background: #eee\">\n    <table width=\"600\" border=
 
 var mail *gomail.Dialer
 
-func InitMail(host, username, password string, port int) {
-	mail = gomail.NewDialer(host, port, username, password)
+func Init() {
+	if !conf.Config.EnableMailVerify {
+		return
+	}
+	c := conf.Config.MailConfig
+	mail = gomail.NewDialer(c.Host, c.Port, c.Email, c.Password)
 }
 
-func SendMail(form, to, code string) error {
+func SendMail(to, code string) error {
 	m := gomail.NewMessage()
-	m.SetHeader("From", form)
+	m.SetHeader("From", conf.Config.MailConfig.Email)
 	m.SetHeader("To", to)
 	m.SetHeader("Subject", "邮件验证码")
 	m.SetBody("text/html", strings.ReplaceAll(tmpl,

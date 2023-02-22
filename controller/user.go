@@ -1,281 +1,220 @@
 package controller
 
 import (
+	"errors"
+	"github.com/Yuzuki616/Aws-Panel/cache"
+	"github.com/Yuzuki616/Aws-Panel/conf"
 	"github.com/Yuzuki616/Aws-Panel/data"
-	"github.com/Yuzuki616/Aws-Panel/session"
+	"github.com/Yuzuki616/Aws-Panel/mail"
+	"github.com/Yuzuki616/Aws-Panel/request"
 	"github.com/Yuzuki616/Aws-Panel/utils"
-	"github.com/gin-contrib/sessions"
 	"github.com/gin-gonic/gin"
-	log "github.com/sirupsen/logrus"
+	"time"
 )
 
-func GetLoginUser(c *gin.Context) string {
-	username := session.GetSession(GetSessionId(c))
-	if username == "" {
-		c.JSON(401, gin.H{
-			"code": 401,
-			"msg":  "用户未登录",
-		})
-		return ""
+func Login(c *gin.Context) error {
+	params := &request.Login{}
+	if err := c.ShouldBind(params); err != nil {
+		return err
 	}
-	return username
-}
-
-func LoginVerify(c *gin.Context) {
-	username := c.PostForm("username")
-	password := c.PostForm("password")
-	if username == "" || password == "" {
-		c.JSON(400, gin.H{
-			"code": 400,
-			"msg":  "信息填写不完整",
-		})
-	}
-	loginErr := data.LoginVerify(username, utils.Md5Encode(password))
-	if loginErr == nil {
-		s := sessions.Default(c)
-		s.Set("loginSession", session.CreateSession(username, 0))
-		saveErr := s.Save()
-		if saveErr != nil {
-			log.Error("")
-		}
-		c.JSON(200, gin.H{
-			"code":    200,
-			"isAdmin": data.IsAdmin(username),
-			"msg":     "登录成功",
-		})
-	} else {
-		c.JSON(400, gin.H{
-			"code": 400,
-			"msg":  loginErr.Error(),
-		})
-	}
-}
-
-func Register(c *gin.Context) {
-	username := c.PostForm("username")
-	email := c.PostForm("email")
-	password := c.PostForm("password")
-	if username == "" || password == "" {
-		c.JSON(400, gin.H{
-			"code": 400,
-			"msg":  "信息填写不完整",
-		})
-	}
-	if data.IsEmailVerity() {
-		code := c.PostForm("code")
-		if code != session.GetMailCode(email) {
-			c.JSON(400, gin.H{
-				"code": 400,
-				"msg":  "验证码不正确或已失效",
-			})
-			return
-		}
-	}
-	registerErr := data.Register(username, email, utils.Md5Encode(password))
-	if registerErr == nil {
-		c.JSON(200, gin.H{
-			"code": 200,
-			"msg":  "注册成功",
-		})
-	} else {
-		c.JSON(400, gin.H{
-			"code": 400,
-			"msg":  registerErr.Error(),
-		})
-	}
-}
-
-func ChangeUsername(c *gin.Context) {
-	username := GetLoginUser(c)
-	oldName := c.PostForm("oldUsername")
-	newName := c.PostForm("newUsername")
-	password := c.PostForm("password")
-	if username == "" {
-		return
-	}
-	err := data.ChangeUsername(oldName, newName, password)
-	Logout(c)
+	err := data.VerifyUser(params.Email, params.Password)
 	if err != nil {
-		c.JSON(400, gin.H{
-			"code": 400,
-			"msg":  err.Error(),
-		})
-	} else {
-		c.JSON(200, gin.H{
-			"code": 200,
-			"msg":  "修改成功",
-		})
+		return err
 	}
+	err = addLoginSession(c, params.Email)
+	if err != nil {
+		return err
+	}
+	c.JSON(200, gin.H{
+		"code":    200,
+		"isAdmin": data.IsAdmin(params.Email),
+		"msg":     "登录成功",
+	})
+	return nil
 }
 
-func ChangePassword(c *gin.Context) {
-	username := GetLoginUser(c)
-	oldPassword := c.PostForm("oldPassword")
-	newPassword := c.PostForm("newPassword")
-	if oldPassword == "" || newPassword == "" {
-		c.JSON(400, gin.H{
-			"code": 400,
-			"msg":  "信息填写不完整",
-		})
+func SendMailVerify(c *gin.Context) error {
+	p := request.SendMailVerify{}
+	if err := c.ShouldBind(&p); err != nil {
+		return err
 	}
-	if username == "" {
-		return
+	if !conf.Config.EnableMailVerify {
+		return errors.New("未开启邮箱验证")
 	}
-	changeErr := data.ChangePassword(username, utils.Md5Encode(oldPassword), utils.Md5Encode(newPassword))
-	if changeErr == nil {
-		s := sessions.Default(c)
-		s.Clear()
-		_ = s.Save()
-		c.JSON(200, gin.H{
-			"code": 200,
-			"msg":  "修改成功",
-		})
-	} else {
+	if _, e := cache.Get(p.Email + "|codeLimit"); e {
+		return errors.New("发送间隔太短，请稍后再试")
+	}
+	code := utils.GenRandomString(6)
+	cache.Set(p.Email+"|code", code, time.Minute*5)
+	cache.Set(p.Email+"|codeLimit", nil, time.Second*60)
+	sendErr := mail.SendMail(p.Email, code)
+	if sendErr != nil {
+		return sendErr
+	}
+	c.JSON(200, gin.H{
+		"code": 200,
+		"msg":  "发送成功",
+	})
+	return nil
+}
+
+func Register(c *gin.Context) error {
+	params := &request.Register{}
+	if err := c.ShouldBind(params); err != nil {
+		return err
+	}
+	if conf.Config.EnableMailVerify {
+		code := c.PostForm("code")
+		if savedCode, e := cache.Get(code + "|code"); !e || savedCode.(string) != code {
+			return errors.New("验证码不正确或已失效")
+		}
+	}
+	registerErr := data.CreateUser(params.Email, params.Email, params.Password, 0)
+	if registerErr != nil {
+		return registerErr
+	}
+	c.JSON(200, gin.H{
+		"code": 200,
+		"msg":  "注册成功",
+	})
+	return nil
+}
+
+func ChangeEmail(c *gin.Context) error {
+	params := &request.ChangeUsername{}
+	if err := c.ShouldBind(params); err != nil {
+		return err
+	}
+	err := data.ChangeEmail(params.OldEmail, params.NewEmail, params.Password)
+	if err != nil {
+		return err
+	}
+	Logout(c)
+	if c.IsAborted() {
+		return nil
+	}
+	c.JSON(200, gin.H{
+		"code": 200,
+		"msg":  "修改成功",
+	})
+	return nil
+}
+
+func ChangePassword(c *gin.Context) error {
+	username := c.GetString("email")
+	params := &request.ChangePassword{}
+	if err := c.ShouldBind(params); err != nil {
+		return err
+	}
+	changeErr := data.ChangeUserPassword(username, params.OldPassword, params.NewPassword)
+	if changeErr != nil {
 		c.JSON(400, gin.H{
 			"code": 400,
 			"msg":  changeErr.Error(),
 		})
 	}
-}
-
-func GetUserInfo(c *gin.Context) {
-	username := GetLoginUser(c)
-	if username == "" {
-		return
+	err := Logout(c)
+	if err != nil {
+		return err
 	}
 	c.JSON(200, gin.H{
 		"code": 200,
+		"msg":  "修改成功",
+	})
+	return nil
+}
+
+func GetUserInfo(c *gin.Context) {
+	email := c.GetString("email")
+	c.JSON(200, gin.H{
+		"code": 200,
 		"msg":  "获取成功",
-		"name": username,
+		"data": email,
 	})
 }
 
-func Logout(c *gin.Context) {
-	id := GetSessionId(c)
-	session.DeleteSession(id)
-	s := sessions.Default(c)
-	s.Clear()
-	_ = s.Save()
+func Logout(c *gin.Context) error {
+	err := delLoginSession(c)
+	if err != nil {
+		return err
+	}
 	c.JSON(200, gin.H{
 		"code": 200,
 		"msg":  "退出成功",
 	})
+	return nil
 }
 
 func IsAdmin(c *gin.Context) {
-	username := GetLoginUser(c)
-	if username == "" {
-		return
-	}
-	if data.IsAdmin(username) {
+	email := c.GetString("email")
+	if data.IsAdmin(email) {
 		c.JSON(200, gin.H{
 			"code": 200,
 			"msg":  true,
 		})
-	} else {
-		c.JSON(200, gin.H{
-			"code": 200,
-			"msg":  false,
-		})
 	}
+	c.JSON(200, gin.H{
+		"code": 200,
+		"msg":  false,
+	})
 }
 
-func DeleteUser(c *gin.Context) {
-	user := c.PostForm("username")
-	username := GetLoginUser(c)
-	if username == "" {
-		return
+func DeleteUser(c *gin.Context) error {
+	params := &request.DeleteUser{}
+	if err := c.ShouldBind(params); err != nil {
+		return err
 	}
-	if data.IsAdmin(username) {
-		err := data.DeleteUser(user)
-		if err != nil {
-			c.JSON(400, gin.H{
-				"code": 400,
-				"msg":  err.Error(),
-			})
-		} else {
-			c.JSON(200, gin.H{
-				"code": 200,
-				"msg":  "删除成功",
-			})
-		}
-	} else {
-		c.JSON(403, gin.H{
-			"code": 403,
-			"msg":  "没有权限",
-		})
+	err := data.DeleteUser(params.Email)
+	if err != nil {
+		return err
 	}
+	c.JSON(200, gin.H{
+		"code": 200,
+		"msg":  "删除成功",
+	})
+	return nil
 }
 
-func BanUser(c *gin.Context) {
-	user := c.PostForm("username")
-	username := GetLoginUser(c)
-	if username == "" {
-		return
+func BanUser(c *gin.Context) error {
+	params := &request.BanUser{}
+	if err := c.ShouldBind(params); err != nil {
+		return err
 	}
-	if data.IsAdmin(username) {
-		err := data.BanUser(user)
-		if err != nil {
-			c.JSON(400, gin.H{
-				"code": 400,
-				"msg":  err.Error(),
-			})
-		} else {
-			c.JSON(200, gin.H{
-				"code": 200,
-				"msg":  "封禁成功",
-			})
-		}
-	} else {
-		c.JSON(403, gin.H{
-			"code": 403,
-			"msg":  "没有权限",
-		})
+	err := data.BanUser(params.Email)
+	if err != nil {
+		return err
 	}
+	c.JSON(200, gin.H{
+		"code": 200,
+		"msg":  "封禁成功",
+	})
+	return nil
 }
 
-func UnBanUser(c *gin.Context) {
-	user := c.PostForm("username")
-	username := GetLoginUser(c)
-	if username == "" {
-		return
+func UnBanUser(c *gin.Context) error {
+	params := &request.BanUser{}
+	if err := c.ShouldBind(params); err != nil {
+		return err
 	}
-	if data.IsAdmin(username) {
-		err := data.UnBanUser(user)
-		if err != nil {
-			c.JSON(400, gin.H{
-				"code": 400,
-				"msg":  err.Error(),
-			})
-		} else {
-			c.JSON(200, gin.H{
-				"code": 200,
-				"msg":  "解封成功",
-			})
-		}
-	} else {
-		c.JSON(403, gin.H{
-			"code": 403,
-			"msg":  "没有权限",
-		})
+	err := data.UnBanUser(params.Email)
+	if err != nil {
+		return err
 	}
+	c.JSON(200, gin.H{
+		"code": 200,
+		"msg":  "解封成功",
+	})
+	return nil
 }
 
-func GetUserList(c *gin.Context) {
-	username := GetLoginUser(c)
-	if username == "" {
-		return
-	}
+func GetUserList(c *gin.Context) error {
 	list, listErr := data.GetUserList()
 	if listErr != nil {
-		c.JSON(400, gin.H{
-			"code": 400,
-			"msg":  listErr.Error(),
-		})
-		return
+		return listErr
 	}
 	c.JSON(200, gin.H{
 		"code": 200,
 		"data": list,
 	})
+	return nil
 }
